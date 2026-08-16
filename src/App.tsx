@@ -1,7 +1,7 @@
-import SuikaGame from '@/components/SuikaGame';
+import MultiplayerSuikaGame from '@/components/MultiplayerSuikaGame.tsx';
 
 function App() {
-  return <SuikaGame />;
+  return <MultiplayerSuikaGame />;
 }
 
 export default App;

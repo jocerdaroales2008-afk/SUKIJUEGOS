@@ -1,18 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PhysicsEngine } from '@/game/physics';
-import { TIERS, SPAWNABLE_TIERS } from '@/game/tiers';
+import { TIERS } from '@/game/tiers';
 import { render } from '@/game/render';
+import type { BoardSnapshot } from '@/multiplayer/types';
 
 const GAME_WIDTH = 420;
 const GAME_HEIGHT = 600;
 const DANGER_Y = 90;
 const AIM_Y = 50;
-const DROP_COOLDOWN = 0.28; // seconds between drops
-
-const HIGH_SCORE_KEY = 'suika-merge-highscore';
+const DROP_COOLDOWN = 0.28;
+const SNAPSHOT_INTERVAL = 0.15;
 
 function randomSpawnTier(): number {
-  // weighted toward smaller tiers
   const r = Math.random();
   if (r < 0.5) return 0;
   if (r < 0.8) return 1;
@@ -20,7 +19,21 @@ function randomSpawnTier(): number {
   return 3;
 }
 
-export default function SuikaGame() {
+interface PlayerBoardProps {
+  active: boolean;
+  onScoreChange: (score: number) => void;
+  onGameOverChange: (over: boolean) => void;
+  onSnapshot: (snapshot: BoardSnapshot) => void;
+  resetSignal: number;
+}
+
+export default function PlayerBoard({
+  active,
+  onScoreChange,
+  onGameOverChange,
+  onSnapshot,
+  resetSignal,
+}: PlayerBoardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<PhysicsEngine | null>(null);
   const rafRef = useRef<number>(0);
@@ -31,20 +44,16 @@ export default function SuikaGame() {
   const nextTierRef = useRef<number>(1);
   const scoreRef = useRef<number>(0);
   const gameOverRef = useRef<boolean>(false);
+  const activeRef = useRef<boolean>(active);
+  const snapshotAccumRef = useRef<number>(0);
 
-  const [score, setScore] = useState(0);
-  const [highScore, setHighScore] = useState(0);
   const [nextTier, setNextTier] = useState(1);
   const [gameOver, setGameOver] = useState(false);
-  const [resetKey, setResetKey] = useState(0);
 
-  // load high score
   useEffect(() => {
-    const stored = localStorage.getItem(HIGH_SCORE_KEY);
-    if (stored) setHighScore(parseInt(stored, 10) || 0);
-  }, []);
+    activeRef.current = active;
+  }, [active]);
 
-  // init engine
   useEffect(() => {
     const engine = new PhysicsEngine(
       {
@@ -58,18 +67,11 @@ export default function SuikaGame() {
         aimY: AIM_Y,
       },
       {
-        onMerge: (_tier, _x, _y) => {},
+        onMerge: () => {},
         onGameOver: () => {
           gameOverRef.current = true;
           setGameOver(true);
-          setHighScore((prev) => {
-            const cur = scoreRef.current;
-            if (cur > prev) {
-              localStorage.setItem(HIGH_SCORE_KEY, String(cur));
-              return cur;
-            }
-            return prev;
-          });
+          onGameOverChange(true);
         },
       }
     );
@@ -77,6 +79,13 @@ export default function SuikaGame() {
     currentTierRef.current = randomSpawnTier();
     nextTierRef.current = randomSpawnTier();
     setNextTier(nextTierRef.current);
+    scoreRef.current = 0;
+    gameOverRef.current = false;
+    setGameOver(false);
+    onScoreChange(0);
+    onGameOverChange(false);
+    dropCooldownRef.current = 0;
+    aimXRef.current = GAME_WIDTH / 2;
 
     lastTimeRef.current = performance.now();
     const loop = (now: number) => {
@@ -91,18 +100,27 @@ export default function SuikaGame() {
         const gained = engine.step(dt);
         if (gained > 0) {
           scoreRef.current += gained;
-          setScore(scoreRef.current);
+          onScoreChange(scoreRef.current);
         }
       } else {
-        // keep particles animating
         engine.step(dt);
+      }
+
+      snapshotAccumRef.current += dt;
+      if (snapshotAccumRef.current >= SNAPSHOT_INTERVAL) {
+        snapshotAccumRef.current = 0;
+        onSnapshot({
+          circles: engine.circles.map((c) => ({ x: c.x, y: c.y, tier: c.tier })),
+          score: scoreRef.current,
+          gameOver: gameOverRef.current,
+        });
       }
 
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          const canDrop = dropCooldownRef.current <= 0 && !gameOverRef.current;
+          const canDrop = dropCooldownRef.current <= 0 && !gameOverRef.current && activeRef.current;
           const cooldownProgress = canDrop ? 1 : 1 - dropCooldownRef.current / DROP_COOLDOWN;
           render(ctx, {
             circles: engine.circles,
@@ -125,9 +143,10 @@ export default function SuikaGame() {
     };
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [resetKey]);
+  }, [resetSignal]);
 
   const handleMove = useCallback((clientX: number) => {
+    if (!activeRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -138,7 +157,7 @@ export default function SuikaGame() {
   }, []);
 
   const handleDrop = useCallback(() => {
-    if (gameOverRef.current || dropCooldownRef.current > 0) return;
+    if (!activeRef.current || gameOverRef.current || dropCooldownRef.current > 0) return;
     const engine = engineRef.current;
     if (!engine) return;
     engine.spawn(aimXRef.current, currentTierRef.current);
@@ -148,113 +167,54 @@ export default function SuikaGame() {
     dropCooldownRef.current = DROP_COOLDOWN;
   }, []);
 
-  const restart = useCallback(() => {
-    scoreRef.current = 0;
-    gameOverRef.current = false;
-    setScore(0);
-    setGameOver(false);
-    dropCooldownRef.current = 0;
-    currentTierRef.current = randomSpawnTier();
-    nextTierRef.current = randomSpawnTier();
-    setNextTier(nextTierRef.current);
-    aimXRef.current = GAME_WIDTH / 2;
-    setResetKey((k) => k + 1);
-  }, []);
-
   return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-[#0f0a1f] via-[#1a1230] to-[#0a0815] flex flex-col items-center justify-center p-4 select-none">
-      <div className="w-full max-w-md">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-4 px-1">
-          <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">Suika Merge</h1>
-            <p className="text-xs text-white/40">Drop &amp; fuse the fruits</p>
-          </div>
-          <div className="flex gap-2">
-            <div className="bg-white/5 backdrop-blur rounded-2xl px-4 py-2 border border-white/10 text-center min-w-[88px]">
-              <div className="text-[10px] uppercase tracking-wider text-white/40">Score</div>
-              <div className="text-xl font-bold text-white tabular-nums">{score.toLocaleString()}</div>
-            </div>
-            <div className="bg-white/5 backdrop-blur rounded-2xl px-4 py-2 border border-white/10 text-center min-w-[88px]">
-              <div className="text-[10px] uppercase tracking-wider text-white/40">Best</div>
-              <div className="text-xl font-bold text-amber-300 tabular-nums">{highScore.toLocaleString()}</div>
-            </div>
-          </div>
-        </div>
+    <div className="relative rounded-3xl overflow-hidden border border-white/10 shadow-2xl shadow-black/50">
+      <canvas
+        ref={canvasRef}
+        width={GAME_WIDTH}
+        height={GAME_HEIGHT}
+        className="block w-full h-auto cursor-pointer touch-none"
+        onMouseMove={(e) => handleMove(e.clientX)}
+        onMouseDown={(e) => {
+          handleMove(e.clientX);
+          handleDrop();
+        }}
+        onTouchStart={(e) => {
+          if (e.touches[0]) handleMove(e.touches[0].clientX);
+        }}
+        onTouchMove={(e) => {
+          if (e.touches[0]) handleMove(e.touches[0].clientX);
+        }}
+        onTouchEnd={(e) => {
+          handleDrop();
+          e.preventDefault();
+        }}
+      />
 
-        {/* Game area */}
-        <div className="relative rounded-3xl overflow-hidden border border-white/10 shadow-2xl shadow-black/50">
-          <canvas
-            ref={canvasRef}
-            width={GAME_WIDTH}
-            height={GAME_HEIGHT}
-            className="block w-full h-auto cursor-pointer touch-none"
-            onMouseMove={(e) => handleMove(e.clientX)}
-            onMouseDown={(e) => {
-              handleMove(e.clientX);
-              handleDrop();
-            }}
-            onTouchStart={(e) => {
-              if (e.touches[0]) handleMove(e.touches[0].clientX);
-            }}
-            onTouchMove={(e) => {
-              if (e.touches[0]) handleMove(e.touches[0].clientX);
-            }}
-            onTouchEnd={(e) => {
-              handleDrop();
-              e.preventDefault();
-            }}
-          />
-
-          {/* Next preview - top right */}
-          <div className="absolute top-3 right-3 bg-black/40 backdrop-blur rounded-2xl px-3 py-2 border border-white/10 flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-white/50">Next</span>
-            <div
-              className="rounded-full border"
-              style={{
-                width: 26,
-                height: 26,
-                background: `radial-gradient(circle at 35% 35%, ${TIERS[nextTier].glow}, ${TIERS[nextTier].color} 70%, ${TIERS[nextTier].shade})`,
-                borderColor: TIERS[nextTier].shade,
-              }}
-            />
-          </div>
-
-          {/* Game Over overlay */}
-          {gameOver && (
-            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex flex-col items-center justify-center z-10 animate-[fadeIn_0.3s_ease]">
-              <div className="text-center px-8">
-                <div className="text-4xl font-black text-white mb-1 tracking-tight">Game Over</div>
-                <p className="text-white/50 text-sm mb-5">The fruits crossed the line!</p>
-                <div className="flex gap-3 justify-center mb-6">
-                  <div className="bg-white/5 rounded-2xl px-5 py-3 border border-white/10">
-                    <div className="text-[10px] uppercase tracking-wider text-white/40">Score</div>
-                    <div className="text-2xl font-bold text-white tabular-nums">{score.toLocaleString()}</div>
-                  </div>
-                  <div className="bg-white/5 rounded-2xl px-5 py-3 border border-white/10">
-                    <div className="text-[10px] uppercase tracking-wider text-white/40">Best</div>
-                    <div className="text-2xl font-bold text-amber-300 tabular-nums">{highScore.toLocaleString()}</div>
-                  </div>
-                </div>
-                {score >= highScore && score > 0 && (
-                  <div className="text-amber-300 text-sm font-semibold mb-4">New record!</div>
-                )}
-                <button
-                  onClick={restart}
-                  className="bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-400 hover:to-orange-400 text-white font-bold px-8 py-3 rounded-2xl shadow-lg shadow-orange-500/30 transition-all hover:scale-105 active:scale-95"
-                >
-                  Play Again
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Footer hint */}
-        <p className="text-center text-white/30 text-xs mt-4">
-          Move to aim &middot; Click or tap to drop
-        </p>
+      <div className="absolute top-3 right-3 bg-black/40 backdrop-blur rounded-2xl px-3 py-2 border border-white/10 flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-white/50">Next</span>
+        <div
+          className="rounded-full border"
+          style={{
+            width: 26,
+            height: 26,
+            background: `radial-gradient(circle at 35% 35%, ${TIERS[nextTier].glow}, ${TIERS[nextTier].color} 70%, ${TIERS[nextTier].shade})`,
+            borderColor: TIERS[nextTier].shade,
+          }}
+        />
       </div>
+
+      {!active && !gameOver && (
+        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+          <span className="text-white/60 text-sm font-semibold">Esperando inicio...</span>
+        </div>
+      )}
+
+      {gameOver && (
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+          <span className="text-white font-bold text-lg">¡Torre desbordada!</span>
+        </div>
+      )}
     </div>
   );
 }
